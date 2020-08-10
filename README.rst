@@ -14,6 +14,7 @@ In order to calculate the speed the plugin keeps the data from previous runs in 
 **Installation**
 =================
 * Download ethMon to the Icinga/Nagios plugin directory (`/usr/lib/nagios/plugins/` on Debian 10)
+        * `Link <https://github.com/githubDante/ethMon/releases/download/v1.0.0/ethMon>`_
 * Ensure that the executable bit of *ethMon* is set
 
 
