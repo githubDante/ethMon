@@ -77,4 +77,4 @@ In order to calculate the speed the plugin keeps the data from previous runs in 
 **Motivation**
 ================
 
-The plugin has been crated as *check_eth* from Nagios Exchange refused to work in my current setup.
+The plugin has been created as *check_eth* from Nagios Exchange refused to work in my current setup.
