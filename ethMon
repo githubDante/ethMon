@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+
+from argparse import ArgumentParser, Namespace
+import re
+from typing import Any, List, Dict, Tuple
+import shelve
+import sys
+from pathlib import Path
+
+__PREV_DATA__ = '{}/.ethMonCache'.format(Path.home().as_posix())
+__total__ = 'tot_{}'
+__old__ = 'old_{}'
+
+__scale__ = {
+    'KB': lambda x: x / 1000,
+    'Kb': lambda x: (x*8) / 1000,
+    'MB': lambda x: x / 1000**2,
+    'Mb': lambda x: (x*8) / 1000**2,
+    'GB': lambda x: x / 1000**3,
+    'Gb': lambda x: (x*8) / 1000**3
+}
+
+__to_bytes__ = {
+    'KB': lambda x: x * 1000,
+    'Kb': lambda x: (x * 1000) / 8,
+    'MB': lambda x: x * 1000**2,
+    'Mb': lambda x: (x * 1000**2) / 8,
+    'GB': lambda x: x * 1000**3,
+    'Gb': lambda x: (x * 1000**3) / 8
+}
+
+
+def options_parser() -> Namespace:
+    _scalers = [i for i in __scale__.keys()]
+    parser = ArgumentParser('ethMon')
+    parser.add_argument('-i', '--interface', required=True, type=str, help='Network interface')
+    parser.add_argument('-w', '--warning', type=int, required=True, help='Warning threshold')
+    parser.add_argument('-c', '--critical', type=int, required=True, help='Critical threshold')
+    parser.add_argument('-s', '--scale', choices=_scalers, help='Scaled results {}'.format(_scalers))
+    parser.add_argument('--interval', type=int, help='Interval between the checks (in seconds)')
+
+    return parser.parse_args()
+
+
+def get_old_data(iface: str) -> Tuple[int, int, int, int]:
+    """
+    Get the old interface data from the storage (if available)
+
+    :param iface: The name of the interface
+    :return: RX bytes, TX bytes, RX Total, TX Total values from the previous run
+    """
+    storage = shelve.open(__PREV_DATA__)
+    rx, tx = storage.get(__old__.format(iface), (0, 0))
+    rx_total, tx_total = storage.get(__total__.format(iface), (0, 0))
+    storage.close()
+    return rx, tx, rx_total, tx_total
+
+
+def update_stats(iface: str, rx_bytes: int, tx_bytes: int) -> None:
+    """
+    Store the data from the current run
+
+    :param iface: The name of the interface
+    :param rx_bytes: RX bytes as read from the net/dev file
+    :param tx_bytes: TX bytes values as read from the net/dev file
+    :return:
+    """
+    storage = shelve.open(__PREV_DATA__)
+    rx_total, tx_total = storage.get(__total__.format(iface), (0, 0))
+    storage[__total__.format(iface)] = (rx_total + rx_bytes, tx_total + tx_bytes)
+    storage[__old__.format(iface)] = (rx_bytes, tx_bytes)
+    storage.close()
+    return
+
+
+def get_iface_stats(iface: str) -> Tuple[int, int]:
+    """
+    Extract the interface statistics
+    :param iface:
+    :return:
+    """
+    """
+    RX/TX slots
+    bytes packets errs drop fifo frame compressed multicast
+    """
+    _rx_bytes = 0
+    _tx_bytes = 0
+    slots = []
+    with open('/proc/net/dev', 'r') as stat:
+        for line in stat:
+            if iface not in line:
+                continue
+            line = line.rstrip()
+            line = re.sub(r'\s\s+', ' ', line)
+            line = line.lstrip(' ')
+            slots = line.split(' ')
+    if len(slots) > 10:
+        _rx_bytes = int(slots[1])
+        _tx_bytes = int(slots[9])
+    return _rx_bytes, _tx_bytes
+
+
+def speed_calc(old_data: tuple, current_data: tuple) -> Tuple[int, int]:
+    """
+    Calculate the changes from the old data
+    :param data:
+    :param current_data:
+    :return:
+    """
+    old_rx, old_tx = old_data[:2]
+    cur_rx, cur_tx = current_data
+
+    return cur_rx - old_rx, cur_tx - old_tx
+
+
+def speed_scaler(val: int, scaler: str) -> str:
+    """
+    available ['KB', 'Kb', 'MB', 'Mb', 'GB', 'Gb']
+    """
+    if scaler not in __scale__.keys():
+        raise
+    return str(round(__scale__[scaler](val), 3))
+
+
+def speed_normalizer(val: int, scaler: str) -> int:
+    """
+    available ['KB', 'Kb', 'MB', 'Mb', 'GB', 'Gb']
+    """
+    if scaler not in __to_bytes__.keys():
+        raise
+    return int(__to_bytes__[scaler](val))
+
+
+def final_string(rx_s: int, tx_s: int, warning_s: int, crit_s: int, code: int):
+    status = 'OK'
+    if code == 2:
+        status = 'CRITICAL'
+    elif code == 1:
+        status = 'WARNING'
+
+    return '{} bandwidth utilization | rx={}B;{}B;{}B tx={}B;{}B;{}B'.format(
+        status, rx_s, warning_s, crit_s, tx_s, warning_s, crit_s
+    )
+
+
+if __name__ == '__main__':
+    options = options_parser()
+    old = get_old_data(options.interface)
+    exit_c = 0
+
+    current = get_iface_stats(options.interface)
+    rx_speed, tx_speed = speed_calc(old, current)
+
+    if options.interval:
+        interval_scaler = lambda x: int(x / options.interval)
+        rx_speed = interval_scaler(rx_speed)
+        tx_speed = interval_scaler(tx_speed)
+
+    update_stats(options.interface, *current)
+
+    if options.scale:
+        _suffix = ' {}'.format(options.scale)
+        c_0 = speed_scaler(current[0], options.scale) + _suffix
+        c_1 = speed_scaler(current[1], options.scale) + _suffix
+        rx_s = speed_scaler(rx_speed, options.scale) + _suffix
+        tx_s = speed_scaler(tx_speed, options.scale) + _suffix
+
+        warning_s = speed_normalizer(options.warning, options.scale)
+        if warning_s < rx_speed or warning_s < tx_speed:
+            exit_c = 1
+        critical_s = speed_normalizer(options.critical, options.scale)
+        if critical_s < rx_speed or critical_s < tx_speed:
+            exit_c = 2
+
+        print('RX {}: {}, TX {}: {}; RX speed: {} TX speed: {}'.format(
+            options.scale, c_0, options.scale, c_1, rx_s, tx_s
+        ), end='; ')
+        print(final_string(rx_speed, tx_speed, warning_s, critical_s, exit_c))
+
+    else:
+        print('RX bytes: {}, TX bytes: {}; RX speed: {}, TX speed {}'.format(
+            current[0], rx_speed, current[1], tx_speed
+        ), end='; ')
+
+        warning_s = options.warning
+        if warning_s < rx_speed or warning_s < tx_speed:
+            exit_c = 1
+        critical_s = options.critical
+        if critical_s < rx_speed or critical_s <= tx_speed:
+            exit_c = 2
+
+        print(final_string(rx_speed, tx_speed, warning_s, critical_s, exit_c))
+
+    sys.exit(exit_c)
