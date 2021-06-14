@@ -75,6 +75,21 @@ In order to calculate the speed the plugin keeps the data from previous runs in 
 
     * **NOTE**: The same value must be used for *check_interval & vars.chk_interval*
 
+**Support for threshold ranges**
+
+* `Icinga threshold ranges documentation <https://icinga.com/docs/icinga-2/latest/doc/05-service-monitoring/#threshold-ranges>`_
+
+
+The plugin has partial support for the ranges described in the Icinga documentation. If used the ranges must be specified for both (warning & critical) parameters.
+ Implemented are the following specifications:
+    * min:max - The value must be outside the range in order the alert to be triggered
+    * @min:max - The value must be inside the range in order the alert to be triggered
+    * min: - The value must be below *min* or above 10*10^256 in order the alert to be triggered
+    * @min: - The value must be between *min* and 10*10^256 in order the alert to be triggered
+    * :max - The value must be below 0 and *max* in order the alert to be triggered
+    * @:max - The value must be between 0 and *max* in order the alert to be triggered
+
+
 **Motivation**
 ================
 

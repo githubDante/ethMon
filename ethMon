@@ -2,7 +2,7 @@
 
 from argparse import ArgumentParser, Namespace
 import re
-from typing import Any, List, Dict, Tuple
+from typing import Any, List, Dict, Tuple, Optional
 import shelve
 import sys
 from pathlib import Path
@@ -34,12 +34,57 @@ def options_parser() -> Namespace:
     _scalers = [i for i in __scale__.keys()]
     parser = ArgumentParser('ethMon')
     parser.add_argument('-i', '--interface', required=True, type=str, help='Network interface')
-    parser.add_argument('-w', '--warning', type=int, required=True, help='Warning threshold')
-    parser.add_argument('-c', '--critical', type=int, required=True, help='Critical threshold')
+    parser.add_argument('-w', '--warning', type=str, required=True, help='Warning threshold')
+    parser.add_argument('-c', '--critical', type=str, required=True, help='Critical threshold')
     parser.add_argument('-s', '--scale', choices=_scalers, help='Scaled results {}'.format(_scalers))
     parser.add_argument('--interval', type=int, help='Interval between the checks (in seconds)')
 
     return parser.parse_args()
+
+
+def threshold_spec(threshold: str) -> bool:
+    """
+    Check for ranges specified in the warning/critical options
+    """
+    try:
+        x, y = threshold.split(':')
+        return True
+    except ValueError:
+        return False
+
+def to_int(x: str) -> int:
+    """
+    Try to convert a value to integer. Always returns zero on unsuccessfull conversion
+
+    :param x: Any 
+    """
+    try:
+        return int(x)
+    except:
+        return 0
+
+def threshold_extract(threshold: str) -> Tuple[int, int, bool]:
+    """
+    Extract the range and the inner/outer parameter
+    
+
+    :return: upper (int), lower (int), inner (bool)
+    """
+    lower, upper = threshold.split(':')
+    if lower == '':
+        lower = 0
+    if upper == '':
+        """ Set the upper limit to a very large number if not specified """
+        upper = 10*10**256
+    if lower.startswith('@'):
+        lower = lower.lstrip('@')
+        inner = True
+    else:
+        inner = False
+    
+    if to_int(lower) > to_int(upper):
+        raise ValueError('Invalid value in threshold specification. lower > upper')
+    return to_int(lower), to_int(upper), inner
 
 
 def get_old_data(iface: str) -> Tuple[int, int, int, int]:
@@ -76,6 +121,7 @@ def update_stats(iface: str, rx_bytes: int, tx_bytes: int) -> None:
 def get_iface_stats(iface: str) -> Tuple[int, int]:
     """
     Extract the interface statistics
+
     :param iface:
     :return:
     """
@@ -102,7 +148,8 @@ def get_iface_stats(iface: str) -> Tuple[int, int]:
 
 def speed_calc(old_data: tuple, current_data: tuple) -> Tuple[int, int]:
     """
-    Calculate the changes from the old data
+    Calculate the changes between the old and new data
+
     :param data:
     :param current_data:
     :return:
@@ -147,6 +194,16 @@ if __name__ == '__main__':
     options = options_parser()
     old = get_old_data(options.interface)
     exit_c = 0
+    if threshold_spec(options.warning) or threshold_spec(options.critical):
+        use_thresholds = True
+        try:
+            warn_lower, warn_upper, warn_inner = threshold_extract(options.warning)
+            crit_lower, crit_upper, crit_inner = threshold_extract(options.critical)
+        except ValueError:
+            print('Invalid range specification.')
+            sys.exit(100)
+    else:
+        use_thresholds = False
 
     current = get_iface_stats(options.interface)
     rx_speed, tx_speed = speed_calc(old, current)
@@ -165,12 +222,34 @@ if __name__ == '__main__':
         rx_s = speed_scaler(rx_speed, options.scale) + _suffix
         tx_s = speed_scaler(tx_speed, options.scale) + _suffix
 
-        warning_s = speed_normalizer(options.warning, options.scale)
-        if warning_s < rx_speed or warning_s < tx_speed:
-            exit_c = 1
-        critical_s = speed_normalizer(options.critical, options.scale)
-        if critical_s < rx_speed or critical_s < tx_speed:
-            exit_c = 2
+        if use_thresholds is False:
+            warning_s = speed_normalizer(to_int(options.warning), options.scale)
+            if warning_s < rx_speed or warning_s < tx_speed:
+                exit_c = 1
+            critical_s = speed_normalizer(to_int(options.critical), options.scale)
+            if critical_s < rx_speed or critical_s < tx_speed:
+                exit_c = 2
+        else:
+            warn_s_low = speed_normalizer(warn_lower, options.scale)
+            warn_s_up = speed_normalizer(warn_upper, options.scale)
+            crit_s_low = speed_normalizer(crit_lower, options.scale)
+            crit_s_up = speed_normalizer(crit_upper, options.scale)
+
+            if warn_inner is True:
+                if (warn_s_low <= rx_speed <= warn_s_up) or (warn_s_low <= tx_speed <= warn_s_up):
+                    exit_c = 1
+            else:
+                if (warn_s_low >= rx_speed or warn_s_up <= rx_speed) or (warn_s_low >= tx_speed or warn_s_up <= tx_speed):
+                    exit_c = 1
+            if crit_inner is True:
+                if (crit_s_low <= rx_speed <= crit_s_up) or (crit_s_low <= tx_speed <= crit_s_up):
+                    exit_c = 2
+            else:
+                if (crit_s_low >= rx_speed or crit_s_up <= rx_speed) or (crit_s_low >= tx_speed or crit_s_up <= tx_speed):
+                    exit_c = 2
+            warning_s = warn_s_low
+            critical_s = crit_s_low
+                
 
         print('RX {}: {}, TX {}: {}; RX speed: {} TX speed: {}'.format(
             options.scale, c_0, options.scale, c_1, rx_s, tx_s
@@ -181,13 +260,28 @@ if __name__ == '__main__':
         print('RX bytes: {}, TX bytes: {}; RX speed: {}, TX speed {}'.format(
             current[0], rx_speed, current[1], tx_speed
         ), end='; ')
-
-        warning_s = options.warning
-        if warning_s < rx_speed or warning_s < tx_speed:
-            exit_c = 1
-        critical_s = options.critical
-        if critical_s < rx_speed or critical_s <= tx_speed:
-            exit_c = 2
+        if use_thresholds is False:
+            warning_s = to_int(options.warning)
+            if warning_s < rx_speed or warning_s < tx_speed:
+                exit_c = 1
+            critical_s = to_int(options.critical)
+            if critical_s < rx_speed or critical_s <= tx_speed:
+                exit_c = 2
+        else:
+            if crit_inner is True:
+                if (warn_lower <= rx_speed <= warn_upper) or (warn_lower <= tx_speed <= warn_upper):
+                    exit_c = 1
+            else:
+                if (warn_lower >= rx_speed or warn_upper <= rx_speed) or (warn_lower >= tx_speed or warn_upper <= rx_speed):
+                    exit_c = 1
+            if crit_inner is True:
+                if (crit_lower <= rx_speed <= crit_upper) or (crit_lower <= tx_speed <= crit_upper):
+                    exit_c = 2
+            else:
+                if (crit_lower >= rx_speed or crit_upper <= rx_speed) or (crit_lower >= tx_speed or crit_upper <= tx_speed):
+                    exit_c = 2
+            warning_s = warn_lower
+            critical_s = crit_lower
 
         print(final_string(rx_speed, tx_speed, warning_s, critical_s, exit_c))
 
